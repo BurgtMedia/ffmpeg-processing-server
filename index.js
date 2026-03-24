@@ -22,6 +22,46 @@ app.get("/", (req, res) => {
   res.json({ status: "ok", message: "FFmpeg Processing Server is running" });
 });
 
+// Speed up audio to 2x
+app.post("/api/speed-audio", async (req, res) => {
+  const { audio_url } = req.body;
+
+  if (!audio_url) {
+    return res.status(400).json({ error: "Missing required field: audio_url" });
+  }
+
+  const jobId = uuidv4();
+  const audioPath = path.join(tempDir, `${jobId}_audio.mp3`);
+  const speedPath = path.join(outputDir, `${jobId}_2x.mp3`);
+
+  try {
+    console.log(`[${jobId}] Speeding up audio...`);
+
+    await downloadFile(audio_url, audioPath);
+
+    // atempo=2.0 speeds up audio 2x WITHOUT changing pitch (no chipmunk effect)
+    await runFFmpeg(
+      `-i "${audioPath}" -filter:a "atempo=2.0" -c:a libmp3lame -b:a 128k -y "${speedPath}"`
+    );
+
+    console.log(`[${jobId}] Audio speed-up complete!`);
+
+    const speedUrl = `${getBaseUrl(req)}/output/${jobId}_2x.mp3`;
+
+    cleanup([audioPath]);
+
+    setTimeout(() => {
+      cleanup([speedPath]);
+    }, 60 * 60 * 1000);
+
+    res.json({ success: true, audio_2x_url: speedUrl });
+  } catch (error) {
+    console.error(`[${jobId}] Error:`, error.message);
+    cleanup([audioPath, speedPath]);
+    res.status(500).json({ error: "Speed-up failed", details: error.message });
+  }
+});
+
 app.post("/api/process", async (req, res) => {
   const { video_url, audio_url } = req.body;
 
