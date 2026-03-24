@@ -45,10 +45,11 @@ app.post("/api/process", async (req, res) => {
     await downloadFile(audio_url, audioPath);
 
     // Slow down video + merge with audio in ONE pass to save memory
-    // ultrafast preset + threads 2 + crf 28 = minimal memory usage
-    console.log(`[${jobId}] Processing: slowing down video and merging with audio...`);
+    // AUDIO IS LEADING: no -shortest flag, so the output matches the full audio duration
+    // If the video is shorter than the audio, the last frame will freeze until the audio ends
+    console.log(`[${jobId}] Processing: slowing down video and merging with audio (audio-leading)...`);
     await runFFmpeg(
-      `-i "${videoPath}" -i "${audioPath}" -filter:v "setpts=2.0*PTS" -c:v libx264 -preset ultrafast -crf 28 -threads 2 -c:a aac -b:a 128k -map 0:v:0 -map 1:a:0 -shortest -movflags +faststart -y "${finalPath}"`
+      `-i "${videoPath}" -i "${audioPath}" -filter:v "setpts=2.0*PTS,tpad=stop_mode=clone:stop_duration=30" -c:v libx264 -preset ultrafast -crf 28 -threads 2 -c:a aac -b:a 128k -map 0:v:0 -map 1:a:0 -movflags +faststart -y "${finalPath}"`
     );
 
     console.log(`[${jobId}] Processing complete!`);
