@@ -44,12 +44,17 @@ app.post("/api/process", async (req, res) => {
     console.log(`[${jobId}] Downloading audio...`);
     await downloadFile(audio_url, audioPath);
 
-    // Slow down video + merge with audio in ONE pass to save memory
-    // AUDIO IS LEADING: no -shortest flag, so the output matches the full audio duration
-    // If the video is shorter than the audio, the last frame will freeze until the audio ends
-    console.log(`[${jobId}] Processing: slowing down video and merging with audio (audio-leading)...`);
+    // Step 1: Get the exact duration of the audio file (this is the leading duration)
+    console.log(`[${jobId}] Getting audio duration...`);
+    const audioDuration = await getMediaDuration(audioPath);
+    console.log(`[${jobId}] Audio duration: ${audioDuration} seconds`);
+
+    // Step 2: Slow down video + merge with audio
+    // Use -t to cut the final output to exactly the audio duration
+    // This ensures the final video is EXACTLY the same length as the 1x voiceover
+    console.log(`[${jobId}] Processing: slowing down video and merging with audio...`);
     await runFFmpeg(
-      `-i "${videoPath}" -i "${audioPath}" -filter:v "setpts=2.0*PTS,tpad=stop_mode=clone:stop_duration=30" -c:v libx264 -preset ultrafast -crf 28 -threads 2 -c:a aac -b:a 128k -map 0:v:0 -map 1:a:0 -movflags +faststart -y "${finalPath}"`
+      `-i "${videoPath}" -i "${audioPath}" -filter:v "setpts=2.0*PTS" -c:v libx264 -preset ultrafast -crf 28 -threads 2 -c:a aac -b:a 128k -map 0:v:0 -map 1:a:0 -t ${audioDuration} -movflags +faststart -y "${finalPath}"`
     );
 
     console.log(`[${jobId}] Processing complete!`);
@@ -95,6 +100,26 @@ function downloadFile(url, destination) {
           } else {
             console.log(`Downloaded ${(size / 1024 / 1024).toFixed(2)} MB`);
             resolve();
+          }
+        }
+      }
+    );
+  });
+}
+
+function getMediaDuration(filePath) {
+  return new Promise((resolve, reject) => {
+    exec(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${filePath}"`,
+      (error, stdout) => {
+        if (error) {
+          reject(new Error(`ffprobe error: ${error.message}`));
+        } else {
+          const duration = parseFloat(stdout.trim());
+          if (isNaN(duration)) {
+            reject(new Error(`Could not parse duration from: ${stdout}`));
+          } else {
+            resolve(duration);
           }
         }
       }
