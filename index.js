@@ -18,8 +18,66 @@ const outputDir = path.join(__dirname, "output");
 if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
+// ============ JOB QUEUE ============
+// Process one video at a time to prevent memory issues
+const jobQueue = [];
+const jobResults = {};
+let isProcessing = false;
+
+function addToQueue(job) {
+  jobQueue.push(job);
+  jobResults[job.jobId] = { status: "queued", position: jobQueue.length };
+  processNextInQueue();
+}
+
+async function processNextInQueue() {
+  if (isProcessing || jobQueue.length === 0) return;
+  isProcessing = true;
+
+  const job = jobQueue.shift();
+
+  // Update positions for remaining jobs
+  jobQueue.forEach((j, i) => {
+    if (jobResults[j.jobId]) jobResults[j.jobId].position = i + 1;
+  });
+
+  try {
+    jobResults[job.jobId] = { status: "processing" };
+    const result = await job.execute();
+    jobResults[job.jobId] = { status: "completed", ...result };
+  } catch (error) {
+    console.error(`[${job.jobId}] Error:`, error.message);
+    jobResults[job.jobId] = { status: "failed", error: error.message };
+  }
+
+  // Clean up result after 1 hour
+  setTimeout(() => {
+    delete jobResults[job.jobId];
+  }, 60 * 60 * 1000);
+
+  isProcessing = false;
+  processNextInQueue();
+}
+
+// ============ ENDPOINTS ============
+
 app.get("/", (req, res) => {
-  res.json({ status: "ok", message: "FFmpeg Processing Server is running" });
+  res.json({
+    status: "ok",
+    message: "FFmpeg Processing Server is running",
+    queue_length: jobQueue.length,
+    is_processing: isProcessing,
+  });
+});
+
+// Check job status
+app.get("/api/job-status/:jobId", (req, res) => {
+  const { jobId } = req.params;
+  const result = jobResults[jobId];
+  if (!result) {
+    return res.status(404).json({ error: "Job not found" });
+  }
+  res.json({ job_id: jobId, ...result });
 });
 
 // Speed up audio to 2x
@@ -39,7 +97,6 @@ app.post("/api/speed-audio", async (req, res) => {
 
     await downloadFile(audio_url, audioPath);
 
-    // atempo=2.0 speeds up audio 2x WITHOUT changing pitch (no chipmunk effect)
     await runFFmpeg(
       `-i "${audioPath}" -filter:a "atempo=2.0" -c:a libmp3lame -b:a 128k -y "${speedPath}"`
     );
@@ -62,6 +119,7 @@ app.post("/api/speed-audio", async (req, res) => {
   }
 });
 
+// Process video — now uses a queue
 app.post("/api/process", async (req, res) => {
   const { video_url, audio_url } = req.body;
 
@@ -72,56 +130,63 @@ app.post("/api/process", async (req, res) => {
   }
 
   const jobId = uuidv4();
-  const videoPath = path.join(tempDir, `${jobId}_video.mp4`);
-  const audioPath = path.join(tempDir, `${jobId}_audio.mp3`);
-  const finalPath = path.join(outputDir, `${jobId}_final.mp4`);
+  const baseUrl = getBaseUrl(req);
 
-  try {
-    console.log(`[${jobId}] Starting processing...`);
+  // Add to queue and return immediately
+  addToQueue({
+    jobId,
+    execute: async () => {
+      const videoPath = path.join(tempDir, `${jobId}_video.mp4`);
+      const audioPath = path.join(tempDir, `${jobId}_audio.mp3`);
+      const finalPath = path.join(outputDir, `${jobId}_final.mp4`);
 
-    console.log(`[${jobId}] Downloading video...`);
-    await downloadFile(video_url, videoPath);
-    console.log(`[${jobId}] Downloading audio...`);
-    await downloadFile(audio_url, audioPath);
+      try {
+        console.log(`[${jobId}] Starting processing...`);
 
-    // Step 1: Get the exact duration of the audio file (this is the leading duration)
-    console.log(`[${jobId}] Getting audio duration...`);
-    const audioDuration = await getMediaDuration(audioPath);
-    console.log(`[${jobId}] Audio duration: ${audioDuration} seconds`);
+        console.log(`[${jobId}] Downloading video...`);
+        await downloadFile(video_url, videoPath);
+        console.log(`[${jobId}] Downloading audio...`);
+        await downloadFile(audio_url, audioPath);
 
-    // Step 2: Slow down video + merge with audio
-    // Use -t to cut the final output to exactly the audio duration
-    // This ensures the final video is EXACTLY the same length as the 1x voiceover
-    console.log(`[${jobId}] Processing: slowing down video and merging with audio...`);
-    await runFFmpeg(
-      `-i "${videoPath}" -i "${audioPath}" -filter:v "setpts=2.0*PTS" -c:v libx264 -preset ultrafast -crf 28 -threads 2 -c:a aac -b:a 128k -map 0:v:0 -map 1:a:0 -t ${audioDuration} -movflags +faststart -y "${finalPath}"`
-    );
+        console.log(`[${jobId}] Getting audio duration...`);
+        const audioDuration = await getMediaDuration(audioPath);
+        console.log(`[${jobId}] Audio duration: ${audioDuration} seconds`);
 
-    console.log(`[${jobId}] Processing complete!`);
+        console.log(`[${jobId}] Processing: slowing down video and merging with audio...`);
+        await runFFmpeg(
+          `-i "${videoPath}" -i "${audioPath}" -filter:v "setpts=2.0*PTS" -c:v libx264 -preset ultrafast -crf 28 -threads 2 -c:a aac -b:a 128k -map 0:v:0 -map 1:a:0 -t ${audioDuration} -movflags +faststart -y "${finalPath}"`
+        );
 
-    const finalUrl = `${getBaseUrl(req)}/output/${jobId}_final.mp4`;
+        console.log(`[${jobId}] Processing complete!`);
 
-    cleanup([videoPath, audioPath]);
+        const finalUrl = `${baseUrl}/output/${jobId}_final.mp4`;
 
-    setTimeout(() => {
-      cleanup([finalPath]);
-      console.log(`[${jobId}] Cleaned up output file`);
-    }, 60 * 60 * 1000);
+        cleanup([videoPath, audioPath]);
 
-    res.json({
-      success: true,
-      job_id: jobId,
-      final_video_url: finalUrl,
-    });
-  } catch (error) {
-    console.error(`[${jobId}] Error:`, error.message);
-    cleanup([videoPath, audioPath, finalPath]);
-    res.status(500).json({
-      error: "Processing failed",
-      details: error.message,
-    });
-  }
+        setTimeout(() => {
+          cleanup([finalPath]);
+          console.log(`[${jobId}] Cleaned up output file`);
+        }, 60 * 60 * 1000);
+
+        return { final_video_url: finalUrl };
+      } catch (error) {
+        cleanup([videoPath, audioPath, finalPath]);
+        throw error;
+      }
+    },
+  });
+
+  // Return immediately with job ID — client will poll for status
+  res.json({
+    success: true,
+    job_id: jobId,
+    status: "queued",
+    position: jobQueue.length,
+    message: "Job queued. Poll /api/job-status/" + jobId + " for updates.",
+  });
 });
+
+// ============ HELPERS ============
 
 function downloadFile(url, destination) {
   return new Promise((resolve, reject) => {
@@ -171,7 +236,7 @@ function runFFmpeg(args) {
   return new Promise((resolve, reject) => {
     const cmd = `ffmpeg ${args}`;
     console.log(`Running: ${cmd}`);
-    exec(cmd, { maxBuffer: 1024 * 1024 * 50, timeout: 300000 }, (error) => {
+    exec(cmd, { maxBuffer: 1024 * 1024 * 50, timeout: 600000 }, (error) => {
       if (error) {
         reject(new Error(`FFmpeg error: ${error.message}`));
       } else {
