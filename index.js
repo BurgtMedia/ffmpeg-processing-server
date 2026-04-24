@@ -11,7 +11,7 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-app.use("/output", express.static(path.join(__dirname, "output")));
+app.use("/output", (req, res, next) => {   res.setHeader("Access-Control-Allow-Origin", "*");   res.setHeader("Access-Control-Allow-Methods", "GET");   next(); }, express.static(path.join(__dirname, "output")));
 
 const tempDir = path.join(__dirname, "temp");
 const outputDir = path.join(__dirname, "output");
