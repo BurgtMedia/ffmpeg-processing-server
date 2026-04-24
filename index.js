@@ -260,7 +260,17 @@ function getBaseUrl(req) {
   }
   return `${req.protocol}://${req.get("host")}`;
 }
-
+app.get("/api/download/:filename", (req, res) => {
+  const { filename } = req.params;
+  const downloadName = req.query.name || filename;
+  const filePath = path.join(outputDir, filename);
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: "File not found" });
+  }
+  res.setHeader("Content-Disposition", `attachment; filename="${downloadName}"`);
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.sendFile(filePath);
+});
 app.listen(PORT, () => {
   console.log(`FFmpeg Processing Server running on port ${PORT}`);
 });
